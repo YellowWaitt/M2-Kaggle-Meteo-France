@@ -17,7 +17,7 @@ class KNNFiller():
         df = add_coords(df)
         df = df[["day_index", "lat", "lon", par]]
         index = np.unique(df["day_index"])
-        df = df.set_index("day_index").sort_index()
+        df = df.set_index("day_index")
         for i in index:
             self._knn.fit_transform(df.loc[i])
         df = df.reset_index()

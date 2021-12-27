@@ -124,5 +124,5 @@ def split_train(X, Y, date="2017-01-01"):
 
 if __name__ == "__main__":
     X, Y, fc_train, obs_train = load_train()
-    X_train, Y_train, X_test, Y_test = split_train(X, Y)
+    # X_train, Y_train, X_test, Y_test = split_train(X, Y)
     # X_test, fc_test, obs_test = load_test()
