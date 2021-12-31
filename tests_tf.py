@@ -4,35 +4,39 @@ https://www.tensorflow.org/tutorials/structured_data/time_series
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import tensorflow as tf
 
-from windowgenerator import WindowGenerator
+from windowgenerator import make_window
 from dataloader import load_train
-from chrono import chrono
+from chrono import chrono, start, stop
 
 
 # %%
 
 X, Y, _, _ = load_train()
+# start("loading datas")
+# df = pd.read_csv("./ignore/train_filled.csv")
+# stop()
 # On prend qu"une seule station pour vérifier que ça fonctionne
-df = X[X["number_sta"] == 22092001].drop(columns=["number_sta", "Id", "date"])
+df = X[X["number_sta"] == 22092001].drop(columns=["Id"])
 # On vire les nan pour les biens du test
 df = df.dropna()
 
-column_indices = {name: i for i, name in enumerate(df.columns)}
-num_features = df.shape[1]
+# column_indices = {name: i for i, name in enumerate(df.columns)}
+# num_features = df.shape[1]
 
-n = len(df)
-train_df = df[0:int(n*0.7)]
-val_df = df[int(n*0.7):int(n*0.9)]
-test_df = df[int(n*0.9):]
+# n = len(df)
+# train_df = df[0:int(n*0.7)]
+# val_df = df[int(n*0.7):int(n*0.9)]
+# test_df = df[int(n*0.9):]
 
-train_mean = train_df.mean()
-train_std = train_df.std()
+# train_mean = train_df.mean()
+# train_std = train_df.std()
 
-train_df = (train_df - train_mean) / train_std
-val_df = (val_df - train_mean) / train_std
-test_df = (test_df - train_mean) / train_std
+# train_df = (train_df - train_mean) / train_std
+# val_df = (val_df - train_mean) / train_std
+# test_df = (test_df - train_mean) / train_std
 
 
 # %% fit et eval
@@ -96,9 +100,7 @@ def compare(ylabel=None):
 
 # %% Modèles à une étapes et une sortie
 
-single_step_window = WindowGenerator(1, 1, 1,
-                                     train_df, val_df, test_df,
-                                     label_columns=["precip"])
+single_step_window = make_window(1, 1, 1, df, label_columns=["precip"])
 print(single_step_window)
 
 
@@ -116,7 +118,7 @@ class Baseline(tf.keras.Model):
         return result[:, :, tf.newaxis]
 
 
-baseline = Baseline(label_index=column_indices["precip"])
+baseline = Baseline(label_index=single_step_window.column_indices["precip"])
 baseline.compile(loss=tf.losses.MeanSquaredError(),
                  metrics=[tf.metrics.MeanAbsoluteError()])
 
@@ -146,9 +148,7 @@ evaluate(dense, "Dense", single_step_window)
 # --------------------------------------------------------------------------- #
 
 CONV_WIDTH = 3
-conv_window = WindowGenerator(CONV_WIDTH, 1, 1,
-                              train_df, val_df, test_df,
-                              label_columns=["precip"])
+conv_window = make_window(CONV_WIDTH, 1, 1, df, label_columns=["precip"])
 print(conv_window)
 
 multi_step_dense = tf.keras.Sequential([
@@ -178,17 +178,14 @@ evaluate(conv_model, "Conv", conv_window)
 
 LABEL_WIDTH = 24
 INPUT_WIDTH = LABEL_WIDTH + (CONV_WIDTH - 1)
-wide_conv_window = WindowGenerator(INPUT_WIDTH, LABEL_WIDTH, 1,
-                                   train_df, val_df, test_df,
-                                   label_columns=["precip"])
+wide_conv_window = make_window(INPUT_WIDTH, LABEL_WIDTH, 1, df,
+                               label_columns=["precip"])
 print(wide_conv_window)
 wide_conv_window.plot(conv_model, title="Conv")
 
 # --------------------------------------------------------------------------- #
 
-wide_window = WindowGenerator(24, 24, 1,
-                              train_df, val_df, test_df,
-                              label_columns=["precip"])
+wide_window = make_window(24, 24, 1, df, label_columns=["precip"])
 
 lstm_model = tf.keras.models.Sequential([
     # Shape [batch, time, features] => [batch, time, lstm_units]
@@ -203,13 +200,14 @@ evaluate(lstm_model, "LSTM", wide_window)
 
 compare(ylabel="mean_absolute_error [precip, normalized]")
 
+
 # %% Modèles à une étapes et plusieurs sorties
 
 # `WindowGenerator` returns all features as labels if you
 # don"t set the `label_columns` argument.
-single_step_window = WindowGenerator(1, 1, 1, train_df, val_df, test_df)
+single_step_window = make_window(1, 1, 1, df)
 
-wide_window = WindowGenerator(24, 24, 1, train_df, val_df, test_df)
+wide_window = make_window(24, 24, 1, df)
 
 # --------------------------------------------------------------------------- #
 
@@ -227,7 +225,7 @@ single_step_window.plot(baseline, title="Baseline")
 dense = tf.keras.Sequential([
     tf.keras.layers.Dense(units=64, activation='relu'),
     tf.keras.layers.Dense(units=64, activation='relu'),
-    tf.keras.layers.Dense(units=num_features)
+    tf.keras.layers.Dense(units=wide_window.num_features)
 ])
 
 evaluate(dense, "Dense", wide_window)
@@ -238,7 +236,7 @@ lstm_model = tf.keras.models.Sequential([
     # Shape [batch, time, features] => [batch, time, lstm_units]
     tf.keras.layers.LSTM(32, return_sequences=True),
     # Shape => [batch, time, features]
-    tf.keras.layers.Dense(units=num_features)
+    tf.keras.layers.Dense(units=wide_window.num_features)
 ])
 
 evaluate(lstm_model, "LSTM", wide_window)
@@ -263,7 +261,7 @@ residual_lstm = ResidualWrapper(
     tf.keras.Sequential([
         tf.keras.layers.LSTM(32, return_sequences=True),
         tf.keras.layers.Dense(
-            num_features,
+            wide_window.num_features,
             # The predicted deltas should start small.
             # Therefore, initialize the output layer with zeros.
             kernel_initializer=tf.initializers.zeros())
@@ -276,12 +274,11 @@ evaluate(residual_lstm, "Residual LSTM", wide_window)
 
 compare(ylabel="MAE (average over all outputs)")
 
+
 # %% Modèles à plusieurs étapes
 
-
 OUT_STEPS = 24
-multi_window = WindowGenerator(24, OUT_STEPS, OUT_STEPS,
-                               train_df, val_df, test_df)
+multi_window = make_window(24, OUT_STEPS, OUT_STEPS, df)
 print(multi_window)
 
 
@@ -325,10 +322,10 @@ multi_linear_model = tf.keras.Sequential([
     # Shape [batch, time, features] => [batch, 1, features]
     tf.keras.layers.Lambda(lambda x: x[:, -1:, :]),
     # Shape => [batch, 1, out_steps*features]
-    tf.keras.layers.Dense(OUT_STEPS * num_features,
+    tf.keras.layers.Dense(OUT_STEPS * multi_window.num_features,
                           kernel_initializer=tf.initializers.zeros()),
     # Shape => [batch, out_steps, features]
-    tf.keras.layers.Reshape([OUT_STEPS, num_features])
+    tf.keras.layers.Reshape([OUT_STEPS, multi_window.num_features])
 ])
 
 evaluate(multi_linear_model, "Linear", multi_window)
@@ -342,10 +339,10 @@ multi_dense_model = tf.keras.Sequential([
     # Shape => [batch, 1, dense_units]
     tf.keras.layers.Dense(512, activation="relu"),
     # Shape => [batch, out_steps*features]
-    tf.keras.layers.Dense(OUT_STEPS * num_features,
+    tf.keras.layers.Dense(OUT_STEPS * multi_window.num_features,
                           kernel_initializer=tf.initializers.zeros()),
     # Shape => [batch, out_steps, features]
-    tf.keras.layers.Reshape([OUT_STEPS, num_features])
+    tf.keras.layers.Reshape([OUT_STEPS, multi_window.num_features])
 ])
 
 evaluate(multi_dense_model, "Dense", multi_window)
@@ -359,10 +356,10 @@ multi_conv_model = tf.keras.Sequential([
     # Shape => [batch, 1, conv_units]
     tf.keras.layers.Conv1D(256, activation="relu", kernel_size=(CONV_WIDTH)),
     # Shape => [batch, 1,  out_steps*features]
-    tf.keras.layers.Dense(OUT_STEPS * num_features,
+    tf.keras.layers.Dense(OUT_STEPS * multi_window.num_features,
                           kernel_initializer=tf.initializers.zeros()),
     # Shape => [batch, out_steps, features]
-    tf.keras.layers.Reshape([OUT_STEPS, num_features])
+    tf.keras.layers.Reshape([OUT_STEPS, multi_window.num_features])
 ])
 
 evaluate(multi_conv_model, "Conv", multi_window)
@@ -374,10 +371,10 @@ multi_lstm_model = tf.keras.Sequential([
     # Adding more `lstm_units` just overfits more quickly.
     tf.keras.layers.LSTM(32, return_sequences=False),
     # Shape => [batch, out_steps*features].
-    tf.keras.layers.Dense(OUT_STEPS * num_features,
+    tf.keras.layers.Dense(OUT_STEPS * multi_window.num_features,
                           kernel_initializer=tf.initializers.zeros()),
     # Shape => [batch, out_steps, features].
-    tf.keras.layers.Reshape([OUT_STEPS, num_features])
+    tf.keras.layers.Reshape([OUT_STEPS, multi_window.num_features])
 ])
 
 evaluate(multi_lstm_model, "LSTM", multi_window)
@@ -433,7 +430,7 @@ class FeedBack(tf.keras.Model):
 
 feedback_model = FeedBack(units=32,
                           out_steps=OUT_STEPS,
-                          num_features=num_features)
+                          num_features=multi_window.num_features)
 
 evaluate(feedback_model, "AR LSTM", multi_window)
 

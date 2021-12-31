@@ -13,12 +13,15 @@ class KNNFiller():
                                copy=False)
 
     def fill(self, df, par):
+        if not np.iterable(par):
+            par = [par]
         to_fill = df
         df = add_coords(df)
-        df = df[["day_index", "lat", "lon", par]]
         index = np.unique(df["day_index"])
         df = df.set_index("day_index")
-        for i in index:
-            self._knn.fit_transform(df.loc[i])
-        df = df.reset_index()
-        to_fill[par] = df[par]
+        for p in par:
+            df_tmp = df[["lat", "lon", p]]
+            for i in index:
+                self._knn.fit_transform(df_tmp.loc[i, :])
+            df_tmp = df_tmp.reset_index()
+            to_fill[p] = df_tmp[p]

@@ -1,24 +1,51 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import tensorflow as tf
+import functools as ft
+
+
+def compute_mean_std(df):
+    df2 = df.drop(columns=["number_sta", "day_index"])
+    mean, std = df2.mean(), df2.std()
+    return mean, std
+
+
+def scale(df, mean, std):
+    df2 = df.drop(columns=["number_sta", "day_index"])
+    df2 = (df2 - mean) / std
+    df2[["number_sta", "day_index"]] = df[["number_sta", "day_index"]]
+    return df2
+
+
+def rescale(df, mean, std):
+    df2 = df.drop(columns=["number_sta", "day_index"])
+    df2 = df2 * std + mean
+    df2[["number_sta", "day_index"]] = df[["number_sta", "day_index"]]
+    return df2
 
 
 class WindowGenerator():
     def __init__(self, input_width, label_width, shift,
-                 train_df, val_df, test_df,
+                 train_df, val_df, test_df=None,
                  label_columns=None):
+        # Store them here for future predictions
+        self.mean, self.std = compute_mean_std(train_df)
+
         # Store the raw data.
-        self.train_df = train_df
-        self.val_df = val_df
-        self.test_df = test_df
+        self.train_df = self.scale(train_df)
+        self.val_df = self.scale(val_df)
+        self.test_df = None if test_df is None else self.scale(test_df)
 
         # Work out the label column indices.
         self.label_columns = label_columns
         if label_columns is not None:
             self.label_columns_indices = {name: i for i, name in
                                           enumerate(label_columns)}
+        self.columns_in = [col for col in train_df.columns
+                           if col not in ["number_sta", "day_index"]]
         self.column_indices = {name: i for i, name in
-                               enumerate(train_df.columns)}
+                               enumerate(self.columns_in)}
 
         # Work out the window parameters.
         self.input_width = input_width
@@ -42,6 +69,12 @@ class WindowGenerator():
             f"Input indices: {self.input_indices}",
             f"Label indices: {self.label_indices}",
             f"Label column name(s): {self.label_columns}"])
+
+    def scale(self, df):
+        return scale(df, self.mean, self.std)
+
+    def rescale(self, df):
+        return rescale(df, self.mean, self.std)
 
     def split_window(self, features):
         inputs = features[:, self.input_slice, :]
@@ -103,32 +136,43 @@ class WindowGenerator():
         plt.suptitle(title)
         plt.show()
 
-    def make_dataset(self, data):
-        data = np.array(data, dtype=np.float32)
-        ds = tf.keras.preprocessing.timeseries_dataset_from_array(
-            data=data,
-            targets=None,
-            sequence_length=self.total_window_size,
-            sequence_stride=1,
-            shuffle=True,
-            batch_size=32,
-        )
+    def make_dataset(self, datas, shuffle):
+        ds_list = []
+        groups = datas.groupby("number_sta")
 
+        for (n_sta, data) in groups:
+            data = data.drop(columns=["number_sta", "day_index"])
+            data = np.array(data, dtype=np.float32)
+            ds = tf.keras.preprocessing.timeseries_dataset_from_array(
+                data=data,
+                targets=None,
+                sequence_length=self.total_window_size,
+                sequence_stride=1,
+                shuffle=shuffle,
+                batch_size=32,
+            )
+            ds_list.append(ds)
+
+        ds = ft.reduce(lambda ds1, ds2: ds1.concatenate(ds2), ds_list)
         ds = ds.map(self.split_window)
+        if shuffle:
+            ds.shuffle(len(ds), reshuffle_each_iteration=False)
 
         return ds
 
     @property
     def train(self):
-        return self.make_dataset(self.train_df)
+        return self.make_dataset(self.train_df, True)
 
     @property
     def val(self):
-        return self.make_dataset(self.val_df)
+        return self.make_dataset(self.val_df, True)
 
     @property
     def test(self):
-        return self.make_dataset(self.test_df)
+        if self.test_df is None:
+            return None
+        return self.make_dataset(self.test_df, False)
 
     @property
     def example(self):
@@ -141,29 +185,58 @@ class WindowGenerator():
             self._example = result
         return result
 
+    @property
+    def num_features(self):
+        return len(self.column_indices)
 
-def make_window(input_width, label_width, shift, df, label_columns):
-    n = len(df)
-    train_df = df[0:int(n*0.7)]
-    val_df = df[int(n*0.7):int(n*0.9)]
-    test_df = df[int(n*0.9):]
 
-    train_mean = train_df.mean()
-    train_std = train_df.std()
+def make_window(input_width, label_width, shift, df, label_columns=None,
+                date_train="2017-07-01", date_val="2017-11-01"):
 
-    train_df = (train_df - train_mean) / train_std
-    val_df = (val_df - train_mean) / train_std
-    test_df = (test_df - train_mean) / train_std
+    slice_train = df["date"] < date_train
+    slice_val = (date_train <= df["date"]) & (df["date"] < date_val)
+    slice_test = date_val <= df["date"]
+
+    df = df.select_dtypes("number")
+
+    train_df = df[slice_train]
+    val_df = df[slice_val]
+    test_df = df[slice_test]
 
     window = WindowGenerator(input_width, label_width, shift,
                              train_df, val_df, test_df,
-                             label_columns=["precip"])
+                             label_columns=label_columns)
     return window
 
 
-# %%
+def make_pred(model, window, df):
+    X = df.select_dtypes("number")
+    X = window.scale(X)
+    X = X.drop(columns=["number_sta", "day_index"])
+    tensor = tf.convert_to_tensor(X)
+    tensor = tensor[:, tf.newaxis, :]
 
-if __name__ == "__main__":
-    df = X[X["number_sta"] == 22092001].drop(columns=["number_sta", "Id", "date"])
-    window = make_window(24, 1, 1, df, label_columns=["precip"])
-    window.plot()
+    pred = model.predict(tensor)
+    pred = pd.DataFrame(tf.reshape(pred, [-1, pred.shape[-1]]),
+                        columns=window.columns_in)
+
+    pred["number_sta"] = df["number_sta"].to_numpy()
+    pred["day_index"] = df["day_index"].to_numpy()
+    pred = window.rescale(pred)
+
+    pred = pred[["number_sta", "day_index", "precip"]]
+    groups = pred.groupby(["number_sta", "day_index"])
+    pred = groups.agg("sum").reset_index()
+
+    return pred
+
+
+def MAPE(Y_truth, Y_pred, *, left="Prediction", right="precip"):
+    df = Y_truth.merge(Y_pred, on="Id", how="left")
+    truth = df[left]
+    pred = df[right]
+    score = truth - pred
+    score /= pred + 1
+    score = np.abs(score)
+    score = 100 * np.mean(score)
+    return score

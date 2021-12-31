@@ -7,7 +7,7 @@ _global_times = []
 def print_time(time, *, name=None):
     h = int(time // 3600)
     time -= h * 3600
-    m = int((time) // 60)
+    m = int(time // 60)
     time -= m * 60
     s = time
     if h > 0:
