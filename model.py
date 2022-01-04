@@ -4,7 +4,7 @@ import pandas as pd
 from chrono import chrono, start, stop
 from dataloader import add_id
 
-from interpolator import KNNFiller
+from datamanip import KNNFiller
 from sklearn.preprocessing import StandardScaler
 
 

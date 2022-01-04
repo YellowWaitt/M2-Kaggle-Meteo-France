@@ -136,9 +136,20 @@ class WindowGenerator():
         plt.suptitle(title)
         plt.show()
 
-    def make_dataset(self, datas, shuffle):
+    def make_dataset(self, datas, *, training=True):
         ds_list = []
         groups = datas.groupby("number_sta")
+
+        if training:
+            sequence_length = self.total_window_size
+            stride = 1
+            shuffle = True
+            split = True
+        else:
+            sequence_length = self.input_width
+            stride = self.input_width
+            shuffle = False
+            split = False
 
         for (n_sta, data) in groups:
             data = data.drop(columns=["number_sta", "day_index"])
@@ -146,15 +157,16 @@ class WindowGenerator():
             ds = tf.keras.preprocessing.timeseries_dataset_from_array(
                 data=data,
                 targets=None,
-                sequence_length=self.total_window_size,
-                sequence_stride=1,
+                sequence_length=sequence_length,
+                sequence_stride=stride,
                 shuffle=shuffle,
                 batch_size=32,
             )
             ds_list.append(ds)
 
         ds = ft.reduce(lambda ds1, ds2: ds1.concatenate(ds2), ds_list)
-        ds = ds.map(self.split_window)
+        if split:
+            ds = ds.map(self.split_window)
         if shuffle:
             ds.shuffle(len(ds), reshuffle_each_iteration=False)
 
@@ -162,17 +174,17 @@ class WindowGenerator():
 
     @property
     def train(self):
-        return self.make_dataset(self.train_df, True)
+        return self.make_dataset(self.train_df, training=True)
 
     @property
     def val(self):
-        return self.make_dataset(self.val_df, True)
+        return self.make_dataset(self.val_df, training=True)
 
     @property
     def test(self):
         if self.test_df is None:
             return None
-        return self.make_dataset(self.test_df, False)
+        return self.make_dataset(self.test_df, training=False)
 
     @property
     def example(self):
@@ -210,14 +222,13 @@ def make_window(input_width, label_width, shift, df, label_columns=None,
 
 
 def make_pred(model, window, df):
+    df = df.sort_values(["number_sta", "day_index", "hour"])
     X = df.select_dtypes("number")
     X = window.scale(X)
-    X = X.drop(columns=["number_sta", "day_index"])
-    tensor = tf.convert_to_tensor(X)
-    tensor = tensor[:, tf.newaxis, :]
+    data = window.make_dataset(X, training=False)
 
-    pred = model.predict(tensor)
-    pred = pd.DataFrame(tf.reshape(pred, [-1, pred.shape[-1]]),
+    pred = model.predict(data, verbose=1, use_multiprocessing=True, workers=-1)
+    pred = pd.DataFrame(pred.reshape((-1, pred.shape[-1])),
                         columns=window.columns_in)
 
     pred["number_sta"] = df["number_sta"].to_numpy()
@@ -225,10 +236,14 @@ def make_pred(model, window, df):
     pred = window.rescale(pred)
 
     pred = pred[["number_sta", "day_index", "precip"]]
+    where = pred["precip"] < 0
+    pred.loc[where, "precip"] = 0
     groups = pred.groupby(["number_sta", "day_index"])
     pred = groups.agg("sum").reset_index()
+    pred["Id"] = \
+        pred["number_sta"].astype(str) + "_" + pred["day_index"].astype(str)
 
-    return pred
+    return pred[["Id", "precip"]]
 
 
 def MAPE(Y_truth, Y_pred, *, left="Prediction", right="precip"):
